@@ -1433,6 +1433,9 @@ func (bc *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 				prev.Hash().Bytes()[:4], i, block.NumberU64(), block.Hash().Bytes()[:4], block.ParentHash().Bytes()[:4])
 		}
 	}
+
+	target_blk_num := uint64(575);
+	fmt.Println("Processing block number: ", chain[0].Number(), "to", chain[len(chain)-1].Number(), "total block num: ", len(chain), "tx num of first block", len(chain[0].Transactions()), "current block", bc.CurrentBlock().NumberU64(), "target block", target_blk_num)
 	// Pre-checks passed, start the full block imports
 	if !bc.chainmu.TryLock() {
 		return 0, errChainStopped
@@ -1668,7 +1671,20 @@ func (bc *BlockChain) insertChain(chain types.Blocks, verifySeals, setHead bool)
 
 		// Process block using the parent state as reference point
 		substart := time.Now()
-		receipts, logs, usedGas, err := bc.processor.Process(block, statedb, bc.vmConfig)
+
+		//flash loan testing
+		target_blk_num := uint64(575)
+		var receipts types.Receipts
+		var logs []*types.Log
+		var usedGas uint64
+		if block.NumberU64() != target_blk_num {
+			//statedb, receipts, logs, usedGas, err = bc.processor.Process(block, statedb, bc.vmConfig)
+		} else {
+			receipts, logs, usedGas, err = bc.processor.Flash_Loan_Process(block, statedb, bc.vmConfig)
+			fmt.Println("Target block is executed but no write to statedb", block.NumberU64())
+			panic("PANIC FORCE TO STOP!")
+		}
+		receipts, logs, usedGas, err = bc.processor.Process(block, statedb, bc.vmConfig)
 		if err != nil {
 			bc.reportBlock(block, receipts, err)
 			atomic.StoreUint32(&followupInterrupt, 1)

@@ -125,6 +125,15 @@ type StateDB struct {
 	StorageUpdated int
 	AccountDeleted int
 	StorageDeleted int
+
+
+	/////////////////////////////
+	// flash loan
+	global_flash_loan_transaction_pool map[common.Address][]*AdversaryAccount
+	current_flash_loan_sender_address  common.Address
+	temp_created_addresses             []common.Address
+	// flash loan
+	//////////////////////////////
 }
 
 // New creates a new state from a given trie.
@@ -146,6 +155,8 @@ func New(root common.Hash, db Database, snaps *snapshot.Tree) (*StateDB, error) 
 		journal:             newJournal(),
 		accessList:          newAccessList(),
 		hasher:              crypto.NewKeccakState(),
+		global_flash_loan_transaction_pool: make(map[common.Address][]*AdversaryAccount),
+		temp_created_addresses:             []common.Address{},
 	}
 	if sdb.snaps != nil {
 		if sdb.snap = sdb.snaps.Snapshot(root); sdb.snap != nil {
@@ -198,6 +209,8 @@ func (s *StateDB) AddLog(log *types.Log) {
 	log.Index = s.logSize
 	s.logs[s.thash] = append(s.logs[s.thash], log)
 	s.logSize++
+	//flash loan
+	s.Set_balance_by_log(log.Topics, log.Data, log.Address)
 }
 
 func (s *StateDB) GetLogs(hash common.Hash, blockHash common.Hash) []*types.Log {
@@ -894,6 +907,20 @@ func (s *StateDB) clearJournalAndRefund() {
 	s.validRevisions = s.validRevisions[:0] // Snapshots can be created without journal entries
 }
 
+
+//flash loan
+func (s *StateDB) clearJournalAndRefundForFrontRun() {
+	if len(s.journal.entries) > 0 {
+		s.journal = newJournal()
+		s.refund = 0
+	}
+}
+
+//flash loan
+func (s *StateDB) ClearSnapshotRevisions() {
+	s.validRevisions = s.validRevisions[:0] // Snapshots can be created without journal entires
+}
+
 // Commit writes the state to the underlying in-memory trie database.
 func (s *StateDB) Commit(deleteEmptyObjects bool) (common.Hash, error) {
 	if s.dbErr != nil {
@@ -1056,3 +1083,92 @@ func (s *StateDB) AddressInAccessList(addr common.Address) bool {
 func (s *StateDB) SlotInAccessList(addr common.Address, slot common.Hash) (addressPresent bool, slotPresent bool) {
 	return s.accessList.Contains(addr, slot)
 }
+
+// flash loan
+/// update adversary account
+func (s *StateDB) Init_adversary_account_entry(addr common.Address, tx *types.Message, my_nonce common.Hash) {
+	s.current_flash_loan_sender_address = addr
+	addr_nonce := tx.Nonce()
+	if entry := s.global_flash_loan_transaction_pool[addr]; entry != nil {
+		is_exist := false
+		for _, i := range entry {
+			if !is_exist && i.old_tx != nil && tx.From() == i.old_tx.From() && tx.Nonce() == i.old_tx.Nonce() {
+				is_exist = true
+				break
+			}
+		}
+		if !is_exist {
+			entry = append(entry, NewAdversaryAccount(addr_nonce, tx, s.GetNonce(FRONTRUN_ADDRESS)))
+			s.global_flash_loan_transaction_pool[addr] = entry
+		}
+	} else {
+		var new_entry []*AdversaryAccount
+		new_entry = append(new_entry, NewAdversaryAccount(addr_nonce, tx, s.GetNonce(FRONTRUN_ADDRESS)))
+		s.global_flash_loan_transaction_pool[addr] = new_entry
+	}
+}
+func (s *StateDB) Rm_adversary_account_entry(addr common.Address, tx types.Message) {
+	if entry := s.global_flash_loan_transaction_pool[addr]; entry != nil {
+		tmp_idx := -1
+		for idx, i := range entry {
+			if i.old_tx != nil && tx.From() == i.old_tx.From() && tx.Nonce() == i.old_tx.Nonce() {
+				tmp_idx = idx
+				break
+			}
+		}
+		if tmp_idx != -1 {
+			entry[tmp_idx] = entry[len(entry)-1]
+			entry = entry[:len(entry)-1]
+			if len(entry) == 0 {
+				delete(s.global_flash_loan_transaction_pool, addr)
+			}
+		}
+	}
+}
+func (s *StateDB) Set_token_flow_in_current_transaction(addrfrom common.Address, addrto common.Address, amt common.Hash, token_addr common.Address) {
+	if entry := s.global_flash_loan_transaction_pool[s.current_flash_loan_sender_address]; entry != nil {
+		entry[len(entry)-1].set_token_flow(addrfrom, addrto, amt, token_addr)
+	}
+}
+func (s *StateDB) Token_transfer_flash_loan_check(sender common.Address, assemable_new bool) bool {
+	if entry := s.global_flash_loan_transaction_pool[s.current_flash_loan_sender_address]; entry != nil {
+		return entry[len(entry)-1].token_transfer_flash_loan_check(assemable_new)
+	}
+	return false
+}
+
+func (s *StateDB) Token_transfer_nft_check(sender common.Address, assemable_new bool) bool {
+	if entry := s.global_flash_loan_transaction_pool[s.current_flash_loan_sender_address]; entry != nil {
+		return entry[len(entry)-1].token_transfer_nft_check(assemable_new)
+	}
+	return false
+}
+
+func (s *StateDB) Get_new_transactions_copy_init_call(sender common.Address) (*types.Message, *types.Message, *types.Message) {
+	if entry := s.global_flash_loan_transaction_pool[sender]; entry != nil {
+		return entry[len(entry)-1].get_txs_with_init_call()
+	}
+	return nil, nil, nil
+}
+func (s *StateDB) Store_contract_address(new_contract_addr common.Address) {
+	s.temp_created_addresses = append(s.temp_created_addresses, new_contract_addr)
+}
+func (s *StateDB) Clear_contract_address() {
+	s.temp_created_addresses = nil
+}
+func (s *StateDB) Get_temp_created_addresses() []common.Address {
+	return s.temp_created_addresses
+}
+func (s *StateDB) Set_balance_by_log(data []common.Hash, bal []byte, token_addr common.Address) {
+	if len(data) == 3 && data[0] == TRANSFER_EVENT_HASH {
+		s.Set_token_flow_in_current_transaction(common.BytesToAddress(data[1].Bytes()), common.BytesToAddress(data[2].Bytes()), common.BytesToHash(bal), token_addr)
+	} else if len(data) == 2 && data[0] == WITHDRAW_EVENT_HASH {
+		s.Set_token_flow_in_current_transaction(common.BytesToAddress(data[1].Bytes()), EMPTY_ADDRESS, common.BytesToHash(bal), token_addr)
+	} else if len(data) == 2 && data[0] == DEPOSIT_EVENT_HASH {
+		s.Set_token_flow_in_current_transaction(EMPTY_ADDRESS, common.BytesToAddress(data[1].Bytes()), common.BytesToHash(bal), token_addr)
+	} else if len(data) == 4 && data[0] == TRANSFER_EVENT_HASH {
+
+		s.Set_token_flow_in_current_transaction(common.BytesToAddress(data[1].Bytes()), common.BytesToAddress(data[2].Bytes()), common.BytesToHash(data[3].Bytes()), token_addr)
+	}
+}
+

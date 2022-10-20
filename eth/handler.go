@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -626,6 +627,7 @@ func (h *handler) BroadcastTransactions(txs types.Transactions) {
 		annos = make(map[*ethPeer][]common.Hash) // Set peer->hash to announce
 
 	)
+	fmt.Println("indisde Broadcast Transactions")
 	// Broadcast transactions to a batch of peers not knowing about it
 	for _, tx := range txs {
 		peers := h.peers.peersWithoutTransaction(tx.Hash())
